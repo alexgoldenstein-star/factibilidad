@@ -19,14 +19,14 @@ export const DEFAULT_PROJECT = {
   fechaCreacion: null,
   fechaModificacion: null,
 
-  // terreno
-  direccion: "",
+  // terreno — uno o más lotes que se unifican en un solo análisis
+  // (compra de doble/triple/cuádruple frente). El lote[0] es el "principal"
+  // y de ahí sale la dirección base para buscar normativa.
+  lotes: [
+    { direccion: "", frente: 18, fondo: 34, precio: 550000 },
+  ],
   tipologia: "U.S.A.M.",
-  supTerreno: 612,
-  frente: 18,
-  fondo: 34,
   anchoCalle: 17,
-  precioTerreno: 550000,
   tipLote: "entremedianeras",
 
   // normativa
@@ -96,7 +96,36 @@ export const DEFAULT_PROJECT = {
  * Motor de cálculo central. Recibe el estado del proyecto y devuelve
  * todos los indicadores derivados (costos, ingresos, márgenes, flujo de fondos).
  */
-export function calcularFactibilidad(p) {
+/**
+ * Normaliza el proyecto: migra el formato viejo (un solo terreno con
+ * direccion/frente/fondo/precioTerreno sueltos) al formato nuevo (array
+ * de lotes), y calcula los agregados (supTerreno, frente total, precio total)
+ * que el resto del motor de cálculo necesita.
+ */
+export function normalizarProyecto(p) {
+  let lotes = p.lotes;
+
+  // Migración desde formato viejo (proyectos guardados antes del cambio a multi-lote)
+  if (!Array.isArray(lotes) || lotes.length === 0) {
+    lotes = [{
+      direccion: p.direccion || "",
+      frente: p.frente || 18,
+      fondo: p.fondo || 34,
+      precio: p.precioTerreno || 0,
+    }];
+  }
+
+  const supTerreno = lotes.reduce((acc, l) => acc + (Number(l.frente) || 0) * (Number(l.fondo) || 0), 0);
+  const frenteTotal = lotes.reduce((acc, l) => acc + (Number(l.frente) || 0), 0);
+  const fondoMax = Math.max(...lotes.map((l) => Number(l.fondo) || 0), 0);
+  const precioTerreno = lotes.reduce((acc, l) => acc + (Number(l.precio) || 0), 0);
+  const direccion = lotes[0]?.direccion || p.direccion || "";
+
+  return { ...p, lotes, supTerreno, frente: frenteTotal, fondo: fondoMax, precioTerreno, direccion };
+}
+
+export function calcularFactibilidad(pInput) {
+  const p = normalizarProyecto(pInput);
   const tip = TIPOLOGIAS[p.tipologia] || TIPOLOGIAS["U.S.A.M."];
 
   // LFI / LIB aproximados (sin reemplazar el cómputo de un arquitecto)
@@ -199,6 +228,7 @@ export function calcularFactibilidad(p) {
 
   return {
     tip, lfiCalc, libCalc,
+    supTerreno: p.supTerreno, precioTerrenoTotal: p.precioTerreno,
     m2TotalConst, m2ViviendasVendibles, m2Vendibles,
     cdcViv, cdcExt, cdcCochPB, cdcCochSS, cdcTotal,
     pctBlandosTotal, costosBlandos,

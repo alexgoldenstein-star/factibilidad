@@ -21,17 +21,34 @@ export async function obtenerProyecto(id) {
 
 export async function crearProyecto(data) {
   const ref = await addDoc(collection(db, COLLECTION), {
-    ...data,
+    ...sanitizar(data),
     fechaCreacion: serverTimestamp(),
     fechaModificacion: serverTimestamp(),
   });
   return ref.id;
 }
 
+function sanitizar(data) {
+  // Firestore no acepta NaN ni undefined; los convertimos a 0 / null
+  // y sacamos el campo "id" que no debe persistirse como dato del documento.
+  const { id, ...rest } = data;
+  const limpio = {};
+  for (const [k, v] of Object.entries(rest)) {
+    if (typeof v === "number" && Number.isNaN(v)) {
+      limpio[k] = 0;
+    } else if (v === undefined) {
+      limpio[k] = null;
+    } else {
+      limpio[k] = v;
+    }
+  }
+  return limpio;
+}
+
 export async function actualizarProyecto(id, data) {
   const ref = doc(db, COLLECTION, id);
   await updateDoc(ref, {
-    ...data,
+    ...sanitizar(data),
     fechaModificacion: serverTimestamp(),
   });
 }

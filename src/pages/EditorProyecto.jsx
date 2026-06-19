@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { TIPOLOGIAS, calcularFactibilidad, fmtUSD, fmtN, pctFmt, DEFAULT_PROJECT } from "../lib/factibilidad";
 import { obtenerProyecto, guardarProyecto } from "../lib/proyectos";
-import { verificarNormativaPorDireccion } from "../lib/normativa";
+import { verificarNormativaPorDireccion, analizarZonaMercado } from "../lib/normativa";
 import { descargarReporte } from "../lib/reportePDF";
 import { S, gold, CRow, Field } from "../components/styles.jsx";
 
@@ -16,6 +16,9 @@ export default function EditorProyecto({ proyectoId, onVolver }) {
   const [normLoading, setNormLoading] = useState(false);
   const [normResult, setNormResult] = useState(null);
   const [normError, setNormError] = useState(null);
+  const [zonaLoading, setZonaLoading] = useState(false);
+  const [zonaResult, setZonaResult] = useState(null);
+  const [zonaError, setZonaError] = useState(null);
   const saveTimer = useRef(null);
   const isFirstLoad = useRef(true);
 
@@ -25,7 +28,19 @@ export default function EditorProyecto({ proyectoId, onVolver }) {
     setLoading(true);
     obtenerProyecto(proyectoId).then((data) => {
       if (!active) return;
-      if (data) setP({ ...DEFAULT_PROJECT, ...data });
+      if (data) {
+        const merged = { ...DEFAULT_PROJECT, ...data };
+        // proyectos guardados antes de soportar multi-lote, o con lotes null por sanitización
+        if (!Array.isArray(merged.lotes) || merged.lotes.length === 0) {
+          merged.lotes = [{
+            direccion: data.direccion || "",
+            frente: data.frente || 18,
+            fondo: data.fondo || 34,
+            precio: data.precioTerreno || 0,
+          }];
+        }
+        setP(merged);
+      }
       isFirstLoad.current = true;
       setLoading(false);
     }).catch(() => setLoading(false));
@@ -46,7 +61,9 @@ export default function EditorProyecto({ proyectoId, onVolver }) {
       try {
         await guardarProyecto(proyectoId, p);
         setSaveState("saved");
+        setTimeout(() => setSaveState((s) => (s === "saved" ? "idle" : s)), 2500);
       } catch (e) {
+        console.error("Error al guardar proyecto:", e);
         setSaveState("error");
       }
     }, SAVE_DEBOUNCE_MS);
@@ -56,13 +73,28 @@ export default function EditorProyecto({ proyectoId, onVolver }) {
 
   const r = calcularFactibilidad(p);
 
+  const agregarLote = () => {
+    if (p.lotes.length >= 4) return; // hasta cuádruple frente
+    update({ lotes: [...p.lotes, { direccion: "", frente: 0, fondo: p.lotes[0]?.fondo || 0, precio: 0 }] });
+  };
+
+  const quitarLote = (i) => {
+    update({ lotes: p.lotes.filter((_, idx) => idx !== i) });
+  };
+
+  const actualizarLote = (i, patch) => {
+    update({ lotes: p.lotes.map((l, idx) => (idx === i ? { ...l, ...patch } : l)) });
+  };
+
   const handleVerificarNormativa = async () => {
-    if (!p.direccion) return;
+    const direccionPrincipal = p.lotes[0]?.direccion;
+    if (!direccionPrincipal) return;
     setNormLoading(true);
     setNormError(null);
     setNormResult(null);
     try {
-      const result = await verificarNormativaPorDireccion(p.direccion);
+      const direccionesAdicionales = p.lotes.slice(1).map((l) => l.direccion).filter(Boolean);
+      const result = await verificarNormativaPorDireccion(direccionPrincipal, direccionesAdicionales);
       setNormResult(result);
     } catch (e) {
       setNormError(e.message || "Error al verificar normativa");
@@ -79,6 +111,27 @@ export default function EditorProyecto({ proyectoId, onVolver }) {
       morfologia: normResult.morfologia || TIPOLOGIAS[tipKey]?.morfologia || p.morfologia,
     });
     setTab(1);
+  };
+
+  const handleAnalizarZona = async () => {
+    const direccionPrincipal = p.lotes[0]?.direccion;
+    if (!direccionPrincipal) return;
+    setZonaLoading(true);
+    setZonaError(null);
+    setZonaResult(null);
+    try {
+      const result = await analizarZonaMercado(direccionPrincipal);
+      setZonaResult(result);
+    } catch (e) {
+      setZonaError(e.message || "Error al analizar la zona");
+    }
+    setZonaLoading(false);
+  };
+
+  const aplicarPrecioZona = () => {
+    if (!zonaResult?.precioPromedioM2) return;
+    update({ precioVivUSD: Math.round(zonaResult.precioPromedioM2) });
+    setTab(2);
   };
 
   const handleDescargarPDF = () => {
@@ -132,16 +185,63 @@ export default function EditorProyecto({ proyectoId, onVolver }) {
               </div>
 
               <div style={S.card}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+                  <div style={{ ...S.cardTitle, marginBottom: 0 }}>Lotes del terreno</div>
+                  <button style={{ ...S.btnGhost, color: gold, borderColor: gold + "55" }} onClick={agregarLote}>+ Agregar lote</button>
+                </div>
+                <div style={S.infoBox()}>
+                  Si estás unificando varios lotes (doble, triple o cuádruple frente), cargá cada uno por separado. El sistema suma superficies y precios automáticamente para el análisis conjunto.
+                </div>
+
+                {p.lotes.map((lote, i) => (
+                  <div key={i} style={{ ...S.normBlock, marginBottom: 10, position: "relative" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: gold }}>Lote {i + 1}{i === 0 ? " (principal)" : ""}</span>
+                      {p.lotes.length > 1 && (
+                        <button onClick={() => quitarLote(i)} style={{ background: "transparent", border: "none", color: "#666", cursor: "pointer", fontSize: 11 }}>✕ Quitar</button>
+                      )}
+                    </div>
+                    <div style={S.grid2}>
+                      <Field label="Dirección"><input style={S.input} placeholder="Av. Forest 365, CABA" value={lote.direccion} onChange={(e) => actualizarLote(i, { direccion: e.target.value })} /></Field>
+                      <Field label="Precio del lote (USD)"><input style={S.input} type="number" value={lote.precio} onChange={(e) => actualizarLote(i, { precio: +e.target.value })} /></Field>
+                    </div>
+                    <div style={S.grid2}>
+                      <Field label="Frente (m)"><input style={S.input} type="number" value={lote.frente} onChange={(e) => actualizarLote(i, { frente: +e.target.value })} /></Field>
+                      <Field label="Fondo (m)"><input style={S.input} type="number" value={lote.fondo} onChange={(e) => actualizarLote(i, { fondo: +e.target.value })} /></Field>
+                    </div>
+                  </div>
+                ))}
+
+                <div style={S.grid2}>
+                  <Field label="Tipo de lote unificado">
+                    <select style={S.select} value={p.tipLote} onChange={(e) => update({ tipLote: e.target.value })}>
+                      <option value="entremedianeras">Entre medianeras</option>
+                      <option value="esquina">Esquina</option>
+                      <option value="doblefrente">Doble frente (unificado)</option>
+                      <option value="triplefrente">Triple frente (unificado)</option>
+                      <option value="cuadruplefrente">Cuádruple frente (unificado)</option>
+                    </select>
+                  </Field>
+                  <Field label="Ancho de calle (m)"><input style={S.input} type="number" value={p.anchoCalle} onChange={(e) => update({ anchoCalle: +e.target.value })} /></Field>
+                </div>
+
+                <div style={{ ...S.normBlock, marginTop: "0.5rem" }}>
+                  <CRow label="Superficie total unificada" value={fmtN(r.supTerreno) + " m²"} bold />
+                  <CRow label="Frente total" value={fmtN(p.lotes.reduce((a, l) => a + (+l.frente || 0), 0)) + " m"} />
+                  <CRow label="Precio terreno total" value={fmtUSD(r.precioTerrenoTotal)} gold />
+                  <CRow label="Precio por m² terreno" value={fmtUSD(r.precioTerrenoTotal / (r.supTerreno || 1)) + "/m²"} />
+                  <CRow label="Incidencia sobre vendibles (est.)" value={fmtUSD(r.incidenciaSobreVendibles) + "/m²"} gold />
+                </div>
+              </div>
+
+              <div style={S.card}>
                 <div style={S.cardTitle}>Verificación automática de normativa</div>
                 <div style={S.infoBox()}>
-                  Ingresá la dirección y verificá con IA qué tipología del Código Urbanístico (Ley 6099) aplica. Esto es una primera aproximación — siempre confirmá con la plancheta oficial del GCBA antes de avanzar con un proyecto.
+                  Verificá con IA qué tipología del Código Urbanístico (Ley 6099) aplica a la parcela unificada. Esto es una primera aproximación — siempre confirmá con la plancheta oficial del GCBA antes de avanzar con un proyecto.
                 </div>
-                <div style={S.searchBox}>
-                  <input style={S.searchInput} placeholder="Av. Forest 365, CABA" value={p.direccion} onChange={(e) => update({ direccion: e.target.value })} onKeyDown={(e) => e.key === "Enter" && handleVerificarNormativa()} />
-                  <button style={S.searchBtn} onClick={handleVerificarNormativa} disabled={normLoading}>
-                    {normLoading ? "Buscando..." : "Verificar con IA ↗"}
-                  </button>
-                </div>
+                <button style={{ ...S.btn, width: "100%", marginBottom: normResult || normError ? 12 : 0 }} onClick={handleVerificarNormativa} disabled={normLoading || !p.lotes[0]?.direccion}>
+                  {normLoading ? "Buscando en el Código Urbanístico..." : "Verificar normativa con IA ↗"}
+                </button>
 
                 {normError && (
                   <div style={{ ...S.normBlock, borderColor: "#A32D2D" }}>
@@ -168,30 +268,42 @@ export default function EditorProyecto({ proyectoId, onVolver }) {
               </div>
 
               <div style={S.card}>
-                <div style={S.cardTitle}>Datos del terreno</div>
-                <div style={S.grid2}>
-                  <Field label="Tipo de lote">
-                    <select style={S.select} value={p.tipLote} onChange={(e) => update({ tipLote: e.target.value })}>
-                      <option value="entremedianeras">Entre medianeras</option>
-                      <option value="esquina">Esquina</option>
-                      <option value="triplefrente">Triple frente (unificado)</option>
-                    </select>
-                  </Field>
-                  <Field label="Precio terreno (USD)"><input style={S.input} type="number" value={p.precioTerreno} onChange={(e) => update({ precioTerreno: +e.target.value })} /></Field>
+                <div style={S.cardTitle}>Panorama de zona / mercado</div>
+                <div style={S.infoBox(gold)}>
+                  Buscá precios actuales de venta en la zona (USD/m²), demanda por tipo de unidad y tendencia, para calibrar el mix de unidades y el precio objetivo.
                 </div>
-                <div style={S.grid3}>
-                  <Field label="Superficie total (m²)"><input style={S.input} type="number" value={p.supTerreno} onChange={(e) => update({ supTerreno: +e.target.value })} /></Field>
-                  <Field label="Frente (m)"><input style={S.input} type="number" value={p.frente} onChange={(e) => update({ frente: +e.target.value })} /></Field>
-                  <Field label="Fondo (m)"><input style={S.input} type="number" value={p.fondo} onChange={(e) => update({ fondo: +e.target.value })} /></Field>
-                </div>
-                <div style={{ ...S.normBlock, marginTop: "0.5rem" }}>
-                  <CRow label="Superficie" value={fmtN(p.supTerreno) + " m²"} />
-                  <CRow label="Precio por m² terreno" value={fmtUSD(p.precioTerreno / p.supTerreno) + "/m²"} />
-                  <CRow label="Incidencia sobre vendibles (est.)" value={fmtUSD(r.incidenciaSobreVendibles) + "/m²"} gold />
-                </div>
-                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "1rem" }}>
-                  <button style={S.btn} onClick={() => setTab(1)}>Siguiente → Normativa</button>
-                </div>
+                <button style={{ ...S.btn, width: "100%", background: "#1E2028", color: gold, marginBottom: zonaResult || zonaError ? 12 : 0 }} onClick={handleAnalizarZona} disabled={zonaLoading || !p.lotes[0]?.direccion}>
+                  {zonaLoading ? "Analizando mercado de la zona..." : "Generar panorama de zona ↗"}
+                </button>
+
+                {zonaError && (
+                  <div style={{ ...S.normBlock, borderColor: "#A32D2D" }}>
+                    <div style={{ fontSize: 12, color: "#E25A5A" }}>{zonaError}</div>
+                  </div>
+                )}
+
+                {zonaResult && (
+                  <div style={{ ...S.normBlock, borderColor: gold + "66" }}>
+                    <CRow label="Zona analizada" value={zonaResult.zona} />
+                    <CRow label="Precio promedio m²" value={fmtUSD(zonaResult.precioPromedioM2)} gold bold />
+                    <CRow label="Rango de mercado" value={fmtUSD(zonaResult.precioPromedioM2Min) + " – " + fmtUSD(zonaResult.precioPromedioM2Max)} />
+                    <div style={{ height: 1, background: gold + "33", margin: "8px 0" }} />
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#888", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>Por tipo de unidad</div>
+                    {(zonaResult.porTipoUnidad || []).map((u, i) => (
+                      <div key={i} style={{ ...S.normRow, alignItems: "flex-start" }}>
+                        <span style={{ color: "#999" }}>{u.tipo}<span style={S.badge(u.demanda === "alta" ? "g" : u.demanda === "media" ? "a" : "r")}>{u.demanda}</span></span>
+                        <span style={{ textAlign: "right" }}>{fmtUSD(u.precioM2)}/m²</span>
+                      </div>
+                    ))}
+                    <div style={{ fontSize: 11, color: "#888", marginTop: 10, fontStyle: "italic" }}>{zonaResult.tendencia}</div>
+                    {zonaResult.perfilComprador && <div style={{ fontSize: 11, color: "#666", marginTop: 6 }}><b style={{ color: "#888" }}>Perfil comprador:</b> {zonaResult.perfilComprador}</div>}
+                    <button style={{ ...S.btn, marginTop: 10, fontSize: 11 }} onClick={aplicarPrecioZona}>Aplicar precio de venta sugerido →</button>
+                  </div>
+                )}
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                <button style={S.btn} onClick={() => setTab(1)}>Siguiente → Normativa</button>
               </div>
             </>
           )}
@@ -506,7 +618,7 @@ export default function EditorProyecto({ proyectoId, onVolver }) {
           <div style={S.sideCard}>
             <div style={S.sideTitle}>KPIs del proyecto</div>
             {[
-              ["Superficie", fmtN(p.supTerreno) + " m²"],
+              ["Superficie", fmtN(r.supTerreno) + " m²"],
               ["m² construibles", fmtN(r.m2TotalConst) + " m²"],
               ["m² vendibles", fmtN(r.m2Vendibles) + " m²"],
               ["Cocheras", p.cochPBQty + " PB / " + p.cochSSQty + " SS"],

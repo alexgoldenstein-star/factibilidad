@@ -1,12 +1,13 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { fmtUSD, fmtN, pctFmt } from "./factibilidad";
+import { fmtUSD, fmtN, pctFmt, normalizarProyecto } from "./factibilidad";
 
 const GOLD = [201, 168, 76];
 const DARK = [20, 22, 28];
 const GRAY = [90, 90, 90];
 
-export function generarReporteInversores(proyecto, resultado) {
+export function generarReporteInversores(proyectoInput, resultado) {
+  const proyecto = normalizarProyecto(proyectoInput);
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const pageW = doc.internal.pageSize.getWidth();
   const margin = 48;
@@ -108,16 +109,39 @@ export function generarReporteInversores(proyecto, resultado) {
     headStyles: { fillColor: GOLD, textColor: 255, fontStyle: "bold" },
     columnStyles: { 0: { fontStyle: "bold", textColor: GRAY } },
     body: [
-      ["Dirección", proyecto.direccion || "—"],
-      ["Superficie del terreno", fmtN(proyecto.supTerreno) + " m²"],
-      ["Frente × Fondo", `${proyecto.frente} m × ${proyecto.fondo} m`],
+      ["Dirección principal", proyecto.direccion || "—"],
+      ["Cantidad de lotes unificados", String(proyecto.lotes.length)],
+      ["Superficie total unificada", fmtN(proyecto.supTerreno) + " m²"],
+      ["Frente total × Fondo máx.", `${proyecto.frente} m × ${proyecto.fondo} m`],
       ["Tipología (Ley 6099)", `${proyecto.tipologia} — ${resultado.tip.label}`],
       ["Altura máxima permitida", proyecto.hMax + " m"],
       ["Morfología edificable", proyecto.morfologia],
-      ["Precio del terreno", fmtUSD(proyecto.precioTerreno)],
+      ["Precio total del terreno", fmtUSD(proyecto.precioTerreno)],
     ],
   });
-  y = doc.lastAutoTable.finalY + 30;
+  y = doc.lastAutoTable.finalY + 20;
+
+  if (proyecto.lotes.length > 1) {
+    autoTable(doc, {
+      startY: y,
+      margin: { left: margin, right: margin },
+      theme: "striped",
+      styles: { fontSize: 8.5, cellPadding: 4 },
+      headStyles: { fillColor: DARK, textColor: GOLD, fontStyle: "bold" },
+      head: [["Lote", "Dirección", "Frente", "Fondo", "Superficie", "Precio"]],
+      body: proyecto.lotes.map((l, i) => [
+        `Lote ${i + 1}${i === 0 ? " (ppal.)" : ""}`,
+        l.direccion || "—",
+        `${l.frente} m`,
+        `${l.fondo} m`,
+        fmtN((l.frente || 0) * (l.fondo || 0)) + " m²",
+        fmtUSD(l.precio),
+      ]),
+    });
+    y = doc.lastAutoTable.finalY + 30;
+  } else {
+    y += 10;
+  }
 
   // ── Cómputo de superficies ────────────────────────────────
   if (y > 650) { doc.addPage(); y = 50; }

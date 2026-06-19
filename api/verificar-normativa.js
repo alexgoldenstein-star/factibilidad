@@ -14,10 +14,13 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Método no permitido" });
   }
 
-  const { direccion } = req.body || {};
+  const { direccion, direccionesAdicionales } = req.body || {};
   if (!direccion || direccion.trim().length < 3) {
     return res.status(400).json({ error: "Falta la dirección o es muy corta" });
   }
+
+  const todasLasDirecciones = [direccion, ...(direccionesAdicionales || []).filter(Boolean)];
+  const esUnificado = todasLasDirecciones.length > 1;
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -57,7 +60,9 @@ Recordá que este código NO usa FOT/FOS, usa tipologías por altura máxima (C.
         messages: [
           {
             role: "user",
-            content: `Buscá la zonificación según el Código Urbanístico (Ley 6099) de CABA para esta dirección: "${direccion}". Usá el mapa de edificabilidad del GCBA (buenosaires.gob.ar/desarrollourbano).`,
+            content: esUnificado
+              ? `Buscá la zonificación según el Código Urbanístico (Ley 6099) de CABA para esta unificación de parcelas (compra de lotes contiguos): ${todasLasDirecciones.map((d) => `"${d}"`).join(", ")}. Como se van a unificar en una sola parcela, indicá la tipología que aplica al conjunto (normalmente la del lote principal o la más restrictiva del grupo). Usá el mapa de edificabilidad del GCBA (buenosaires.gob.ar/desarrollourbano).`
+              : `Buscá la zonificación según el Código Urbanístico (Ley 6099) de CABA para esta dirección: "${direccion}". Usá el mapa de edificabilidad del GCBA (buenosaires.gob.ar/desarrollourbano).`,
           },
         ],
         tools: [{ type: "web_search_20250305", name: "web_search" }],
@@ -73,15 +78,35 @@ Recordá que este código NO usa FOT/FOS, usa tipologías por altura máxima (C.
     const textBlocks = (data.content || []).filter((b) => b.type === "text").map((b) => b.text);
     const fullText = textBlocks.join("\n").trim();
 
-    // Intentar parsear el JSON de la respuesta (puede venir con texto alrededor)
-    let parsed;
-    try {
-      const jsonMatch = fullText.match(/\{[\s\S]*\}/);
-      parsed = JSON.parse(jsonMatch ? jsonMatch[0] : fullText);
-    } catch (e) {
+    // Intentar parsear el JSON de la respuesta. Probamos varias estrategias
+    // porque el modelo puede devolver texto explicativo alrededor del JSON,
+    // o el JSON envuelto en ```json ... ``` pese a la instrucción de no hacerlo.
+    let parsed = null;
+    const intentos = [
+      () => JSON.parse(fullText),
+      () => {
+        const m = fullText.match(/```json\s*([\s\S]*?)```/i);
+        return m ? JSON.parse(m[1]) : null;
+      },
+      () => {
+        // toma el bloque { ... } más largo balanceado
+        const start = fullText.indexOf("{");
+        const end = fullText.lastIndexOf("}");
+        if (start === -1 || end === -1 || end <= start) return null;
+        return JSON.parse(fullText.slice(start, end + 1));
+      },
+    ];
+    for (const intento of intentos) {
+      try {
+        const r = intento();
+        if (r) { parsed = r; break; }
+      } catch (e) { /* probar siguiente estrategia */ }
+    }
+
+    if (!parsed) {
       return res.status(502).json({
-        error: "No se pudo interpretar la respuesta de normativa",
-        rawResponse: fullText,
+        error: "No se pudo interpretar la respuesta de normativa. Probá de nuevo o cargá los datos manualmente.",
+        rawResponse: fullText.slice(0, 2000),
       });
     }
 
